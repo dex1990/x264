@@ -89,7 +89,13 @@ typedef struct x264_frame
     pixel *buffer[4];
     pixel *buffer_fld[4];
     pixel *buffer_lowres;
-
+#if X264_PRE_FILTER	
+		pixel *plane_dnr[3];// point to bufffer
+		pixel *buffer_dnr[4];// buffer for denoise 
+	
+		pixel *plane_cdef[3];// point to bufffer
+		//pixel *buffer_cdef[4];// buffer for cdef
+#endif
     x264_weight_t weight[X264_REF_MAX][3]; /* [ref_index][plane] */
     pixel *weighted[X264_REF_MAX]; /* plane[0] weighted of the reference frames */
     int b_duplicate;

@@ -2912,6 +2912,608 @@ static inline void mb_analyse_qp_rd( x264_t *h, x264_mb_analysis_t *a )
     }
 }
 
+#if X264_CDEF
+/* Detect direction. 0 means 45-degree up-right, 2 is horizontal, and so on.
+   The search minimizes the weighted variance along all the lines in a
+   particular direction, i.e. the squared error between the input and a
+   "predicted" block where each pixel is replaced by the average along a line
+   in a particular direction. Since each direction have the same sum(x^2) term,
+   that term is never computed. See Section 2, step 2, of:
+   http://jmvalin.ca/notes/intra_paint.pdf */
+static inline int cdef_find_dir(const pixel *img, int stride, int32_t *var,
+	int coeff_shift) {
+	int i;
+	int32_t cost[8] = { 0 };
+	int partial[8][15] = { { 0 } };
+	int32_t best_cost = 0;
+	int best_dir = 0;
+	/* Instead of dividing by n between 2 and 8, we multiply by 3*5*7*8/n.
+	   The output is then 840 times larger, but we don't care for finding
+	   the max. */
+	static const int div_table[] = { 0, 840, 420, 280, 210, 168, 140, 120, 105 };
+	for (i = 0; i < 8; i++) {
+		int j;
+		for (j = 0; j < 8; j++) {
+			int x;
+			/* We subtract 128 here to reduce the maximum range of the squared
+			   partial sums. */
+			x = (img[i * stride + j] >> coeff_shift) - 128;
+			partial[0][i + j] += x;
+			partial[1][i + j / 2] += x;
+			partial[2][i] += x;
+			partial[3][3 + i - j / 2] += x;
+			partial[4][7 + i - j] += x;
+			partial[5][3 - i / 2 + j] += x;
+			partial[6][j] += x;
+			partial[7][i / 2 + j] += x;
+		}
+	}
+	for (i = 0; i < 8; i++) {
+		cost[2] += partial[2][i] * partial[2][i];
+		cost[6] += partial[6][i] * partial[6][i];
+	}
+	cost[2] *= div_table[8];
+	cost[6] *= div_table[8];
+	for (i = 0; i < 7; i++) {
+		cost[0] += (partial[0][i] * partial[0][i] +
+			partial[0][14 - i] * partial[0][14 - i]) *
+			div_table[i + 1];
+		cost[4] += (partial[4][i] * partial[4][i] +
+			partial[4][14 - i] * partial[4][14 - i]) *
+			div_table[i + 1];
+	}
+	cost[0] += partial[0][7] * partial[0][7] * div_table[8];
+	cost[4] += partial[4][7] * partial[4][7] * div_table[8];
+	for (i = 1; i < 8; i += 2) {
+		int j;
+		for (j = 0; j < 4 + 1; j++) {
+			cost[i] += partial[i][3 + j] * partial[i][3 + j];
+		}
+		cost[i] *= div_table[8];
+		for (j = 0; j < 4 - 1; j++) {
+			cost[i] += (partial[i][j] * partial[i][j] +
+				partial[i][10 - j] * partial[i][10 - j]) *
+				div_table[2 * j + 2];
+		}
+	}
+	for (i = 0; i < 8; i++) {
+		if (cost[i] > best_cost) {
+			best_cost = cost[i];
+			best_dir = i;
+		}
+	}
+	/* Difference between the optimal variance and the variance along the
+	   orthogonal direction. Again, the sum(x^2) terms cancel out. */
+	*var = best_cost - cost[(best_dir + 4) & 7];
+	/* We'd normally divide by 840, but dividing by 1024 is close enough
+	   for what we're going to do with this. */
+	*var >>= 10;
+	return best_dir;
+}
+/* Generated from gen_filter_tables.c. */
+static const int cdef_directions[8][2][2] = {
+  { {1,-1},{2,-2}},
+  { {1,0 },{2,-1}},
+  { {1,0 },{2,0 }},
+  { {1,0 },{2,1 }},
+  { {1,1 },{2,2 }},
+  { {0,1 },{1 ,0}},
+  { {0,1 },{0 ,0}},
+  { {0,1 },{-1,0}}
+};
+static const int cdef_pri_taps[2][2] = { { 4, 2 }, { 3, 3 } };
+static const int cdef_sec_taps[2][2] = { { 2, 1 }, { 2, 1 } };
+
+static int get_msb(unsigned int n) {
+	int log = 0;
+	assert(n);
+	if (n & 0xFFFF0000) log |= 16;
+	if (n & 0xFF00FF00) log |= 8;
+	if (n & 0xF0F0F0F0) log |= 4;
+	if (n & 0xCCCCCCCC) log |= 2;
+	if (n & 0xAAAAAAAA) log |= 1;
+	return log;
+}
+
+static inline int sign(int i) { return i < 0 ? -1 : 1; }
+
+static inline int constrain(int diff, int threshold, int damping) {
+	if (!threshold) return 0;
+
+	const int shift = X264_MAX(0, damping - get_msb(threshold));
+	return sign(diff) *
+		X264_MIN(abs(diff), X264_MAX(0, threshold - (abs(diff) >> shift)));
+}
+/* Smooth in the direction detected. */
+static inline void cdef_filter_block(x264_t *h,pixel *dst8,const pixel *in,
+	int instride,int pri_strength, int sec_strength,
+	int dir, int pri_damping, int sec_damping, int ch,
+	int coeff_shift,int var) {
+	int i, j, k;
+	const int *pri_taps = cdef_pri_taps[(pri_strength >> coeff_shift) & 1];
+	const int *sec_taps = cdef_sec_taps[(pri_strength >> coeff_shift) & 1];
+	float sharp_ratio = h->param.x264_sharp_ratio;
+	if (IS_X264_TYPE_I(h->fenc->i_type))
+	{
+		sharp_ratio = h->param.x264_sharp_ratio>1.0? 1.0: h->param.x264_sharp_ratio;
+	}
+	for (i = 0; i < (ch == 0 ? 8 : 4); i++) {
+		for (j = 0; j < (ch == 0 ? 8 : 4); j++) {
+			int16_t sum = 0;
+			int16_t y;
+			pixel x = in[i * instride + (ch == 0 ? j : (j << 1))];// central pixl to be filtered 
+			//pixel x2 = dst8[i * FENC_STRIDE + j];
+			int max_pixl = x;
+			int min_pixl = x;
+		
+			int sum_v2 = 4*x;
+			for (k = 0; k < 2; k++) {
+				int16_t h_offset_pri = cdef_directions[dir][k][0];
+				int16_t v_offset_pri = cdef_directions[dir][k][1];
+				int16_t h_offset_s0 = cdef_directions[(dir + 2) & 7][k][0];
+				int16_t v_offset_s0 = cdef_directions[(dir + 2) & 7][k][1];
+				int16_t h_offset_s1 = cdef_directions[(dir + 6) & 7][k][0];
+				int16_t v_offset_s1 = cdef_directions[(dir + 6) & 7][k][1];
+				pixel p0 = in[(i + v_offset_pri) * instride +  (ch == 0 ? (j + h_offset_pri) : ((j + h_offset_pri) << 1))];// primary filter tap_k pixl0
+				pixel p1 = in[(i - v_offset_pri) * instride +  (ch == 0 ? (j - h_offset_pri) : ((j - h_offset_pri) << 1))];// primary filter tap_k pixl1 (on the other side to pixl0)
+				pixel s1 = in[(i - v_offset_s0)  * instride +  (ch == 0 ? (j - h_offset_s0) : ((j - h_offset_s0) << 1))];
+				pixel s0 = in[(i + v_offset_s0)  * instride +  (ch == 0 ? (j + h_offset_s0) : ((j + h_offset_s0) << 1))];
+				pixel s2 = in[(i + v_offset_s1)  * instride +  (ch == 0 ? (j + h_offset_s1) : ((j + h_offset_s1) << 1))];
+				pixel s3 = in[(i - v_offset_s1)  * instride +  (ch == 0 ? (j - h_offset_s1) : ((j - h_offset_s1) << 1))];
+#if X264_SHARP
+				if (ch == 0)
+				{
+					if (k == 0) {
+						sum_v2 += 2 * in[(i + 1) * instride + (j + 0)];
+						sum_v2 += 2 * in[(i - 1) * instride + (j + 0)];
+						sum_v2 += 2 * in[i * instride + (j + 1)];
+						sum_v2 += 2 * in[i * instride + (j - 1)];
+						sum_v2 += 1 * in[(i + 1) * instride + (j + 1)];
+						sum_v2 += 1 * in[(i + 1) * instride + (j - 1)];
+						sum_v2 += 1 * in[(i - 1) * instride + (j + 1)];
+						sum_v2 += 1 * in[(i - 1) * instride + (j - 1)];
+
+					}
+				}
+#endif
+				sum += pri_taps[k] * constrain(p0 - x, pri_strength, pri_damping);
+				sum += pri_taps[k] * constrain(p1 - x, pri_strength, pri_damping);
+				sum += sec_taps[k] * constrain(s0 - x, sec_strength, sec_damping);
+				sum += sec_taps[k] * constrain(s1 - x, sec_strength, sec_damping);
+				sum += sec_taps[k] * constrain(s2 - x, sec_strength, sec_damping);
+				sum += sec_taps[k] * constrain(s3 - x, sec_strength, sec_damping);
+				max_pixl = X264_MAX(p0, max_pixl);
+				max_pixl = X264_MAX(p1, max_pixl);
+				max_pixl = X264_MAX(s0, max_pixl);
+				max_pixl = X264_MAX(s1, max_pixl);
+				max_pixl = X264_MAX(s2, max_pixl);
+				max_pixl = X264_MAX(s3, max_pixl);
+				min_pixl = X264_MIN(p0, min_pixl);
+				min_pixl = X264_MIN(p1, min_pixl);
+				min_pixl = X264_MIN(s0, min_pixl);
+				min_pixl = X264_MIN(s1, min_pixl);
+				min_pixl = X264_MIN(s2, min_pixl);
+				min_pixl = X264_MIN(s3, min_pixl);
+
+			}
+
+			// CDEF_RESULT
+			y = x264_clip3((pixel)x + ((8 + sum - (sum < 0)) >> 4), min_pixl, max_pixl);
+
+#if X264_SHARP
+			//for sharp
+			if(ch==0){
+				int pixl_diff = y - x264_clip3((sum_v2 + 8) / 16, 0, 255);
+				if ( (var/32) > 1 /*&& abs(pixl_diff) > 1 && abs(min_pixl - max_pixl) <30*/) {
+					//printf("pixl_diff:%d,var>>6:%d \n", pixl_diff, var );
+					y = (int)y + x264_clip3(sharp_ratio * pixl_diff,(min_pixl-max_pixl),(max_pixl-min_pixl));
+					y = x264_clip3(y, 0, 255);
+				}
+			}
+#endif			
+ 
+			dst8[i * FENC_STRIDE + j] = (pixel)y;	
+		}
+	}
+}
+/* Compute the primary filter strength for an 8x8 block based on the
+   directional variance difference. A high variance difference means
+   that we have a highly directional pattern (e.g. a high contrast
+   edge), so we can apply more deringing. A low variance means that we
+   either have a low contrast edge, or a non-directional texture, so
+   we want to be careful not to blur. */
+static inline int adjust_strength(int strength, int32_t var) {
+	const int i = var >> 6 ? X264_MIN(get_msb(var >> 6), 12) : 0;
+	/* We use the variance of 8x8 blocks to adjust the strength. */
+	return var ? (strength * (4 + i) + 8) >> 4 : 0;
+}
+
+
+static inline void x264_cdef_mb(x264_t *h,int level) {
+	int i, j,ch;
+	int pri_strength = level;
+	int sec_strength = level%4;
+	int dir[2][2], var[2][2];
+	int quantizer_to_qindex[] = {
+	  0,   4,   8,   12,  16,  20,  24,  28,  32,  36,  40,  44,  48,
+	  52,  56,  60,  64,  68,  72,  76,  80,  84,  88,  92,  96,  100,
+	  104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152,
+	  156, 160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204,
+	  208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 249, 255,
+	};
+	int pri_damping = 3 + (quantizer_to_qindex[h->mb.i_qp] >> 6);
+	int sec_damping = 3 + (quantizer_to_qindex[h->mb.i_qp] >> 6);
+
+	if (level < 1)
+	{
+		return;
+	}
+	
+	for (i = 0; i < 2; i++) { // caculate direction using luma pixels	
+		for (j = 0; j < 2; j++) {
+			dir[i][j] = cdef_find_dir(&(h->mb.pic.p_fenc[0][i * 8 * FENC_STRIDE + j * 8]), FENC_STRIDE, &var[i][j], 0);
+		}
+	}
+	//printf("h->fenc->i_slice_count:%d\n",h->fenc->i_slice_count);
+	for(ch=0;ch<3;ch++)
+	{
+		const int w_size_log2 = 4;
+		const int h_size_log2 = (ch == 0 ? 4 : 3);
+		const int i_stride = h->fenc->i_stride[!!ch];
+		int mb_pix_offset = (h->mb.i_mb_x << w_size_log2) + (h->mb.i_mb_y << h_size_log2) * i_stride;		
+		int bs = (ch == 0 ? 8 : 4);
+		for (i = 0; i < 2; i++) {
+			for (j = 0; j < 2; j++) {
+				int i_pix_offset = mb_pix_offset + i * bs* i_stride + (ch == 0 ? j*bs : ((bs*j) << 1)+ch-1);
+				cdef_filter_block( h,
+					&h->mb.pic.p_fenc[ch][i * bs * FENC_STRIDE + j * bs],
+					/*&h->fenc->plane[!!ch][i_pix_offset], i_stride,*/
+					&h->fenc->plane_dnr[!!ch][i_pix_offset], i_stride,
+					(ch ? pri_strength : adjust_strength(pri_strength, var[i][j])), sec_strength+(sec_strength==3), dir[i][j],
+					pri_damping, sec_damping, ch, 0, var[i][j]);
+			}
+		}
+	}
+}
+#endif 
+
+#if X264_DNR
+static inline void denoise_2d(x264_t *h, int start_x, int start_y, int width, int height, int ch, int dn_idx_curr)
+{
+	int i, j, m, n;
+	int abs_diff;
+	int curr_c;
+	int curr_pix, ref_pixl;
+	const int w_size_log2 = 4;
+	const int h_size_log2 = (ch == 0 ? 4 : 3);
+	const int i_stride = h->fenc->i_stride[!!ch];
+
+	int mb_pix_offset = (h->mb.i_mb_x << w_size_log2) + (h->mb.i_mb_y << h_size_log2) * i_stride;
+	int pic_w = ch == 0 ? h->param.i_width : h->param.i_width >> 1;
+	int pic_h = ch == 0 ? h->param.i_height : h->param.i_height >> 1;
+	int mb_y_offset = h->mb.i_mb_y << h_size_log2;
+	int mb_x_offset = h->mb.i_mb_x << (ch == 0 ? 4 : 3);
+	int i_pix_offset = 0;
+
+	if (h->mb.i_mb_y == 0) {// first row mb
+		start_y = start_y;
+		height = height + 2; 
+	}
+	else if(h->mb.i_mb_height-1 == h->mb.i_mb_y)
+	{
+		start_y = start_y+2;
+		height = height - 2;
+	}
+	else
+	{
+		start_y = start_y+2;
+		height = height;
+	}
+
+
+	if (h->mb.i_mb_x == 0) {
+		start_x= start_x;
+		width = width + 2;
+	}
+	else if (h->mb.i_mb_width - 1 == h->mb.i_mb_x)
+	{
+		width = width - 2;
+		start_x = start_x + 2;
+	}
+	else
+	{
+		width = width;
+		start_x = start_x+2;
+	}
+
+
+	for (i = start_y; i < (start_y+height); i++) {
+		for (j = start_x; j < (start_x+width); j++) {
+			int sum_c = 0;
+			int sum_v = 0;
+			int res_pix = 0;
+
+			i_pix_offset = mb_pix_offset + i * i_stride + (ch == 0 ? j : 2 * j + ch - 1);
+			if (((mb_x_offset + j) < 0) || ((mb_x_offset + j) > (pic_w - 1)) || ((mb_y_offset + i) > (pic_h - 1)) || (mb_y_offset + i < 0))
+			{
+				//h->fenc->plane_dnr[!!ch][i_pix_offset]= h->fenc->plane[!!ch][0*i_stride+]
+				continue;
+			}
+			//i_pix_offset = mb_pix_offset + i * i_stride + (ch == 0 ? j : ((j << 1) + ch - 1));
+
+			curr_pix = h->fenc->plane[!!ch][i_pix_offset];//get org_pixl
+			for (m = -2; m <= 2; m++) {
+				for (n = -2; n <= 2; n++) {
+					if ( ((mb_y_offset + i + m) < 0) || (mb_x_offset + j + n) < 0 || (mb_x_offset + j + n) >= pic_w || (mb_y_offset + i + m) >= pic_h)
+						continue;
+					else
+					{
+						int x_offset = (h->mb.i_mb_x << w_size_log2) + (ch == 0 ? (j + n) : (((j + n) << 1) + ch - 1));
+						ref_pixl = h->fenc->plane[!!ch][(mb_y_offset + i + m)*i_stride + x_offset];
+						abs_diff = abs(curr_pix - ref_pixl);
+						abs_diff = (abs_diff &(~0x1f)) ? 31 : abs_diff;
+						curr_c = h->param.dnr.Bilateral_table[dn_idx_curr][abs_diff][m + 2][n + 2];
+						//curr_c = h->param.dnr.Bilateral_table[dn_idx_curr][abs_diff][2][2];
+						sum_c += curr_c;
+						sum_v += curr_c * ref_pixl;
+
+					}
+				}
+			}
+			sum_c += 2;
+			sum_v += curr_pix << 1;
+			res_pix = (sum_v + sum_c / 2) / sum_c;
+			//clip
+			res_pix = x264_clip3(res_pix, 0, 255);
+			//write to plane_dnr  pic_buffer 
+
+			h->fenc->plane_dnr[!!ch][i_pix_offset]= (uint8_t)res_pix;
+			//h->mb.pic.p_fenc[ch][i*FENC_STRIDE + j] = (uint8_t)res_pix;
+		}
+	}
+
+}
+static inline void denoise_3d_2(x264_t *h, int start_x, int start_y, int width, int height, int num_ref,int alpha[], int ch, int dn_idx_curr, int dn_idx_ref, pixel **ref_ptr, int *ref_stride)
+{
+	int i, j,n;
+	int pic_w = ch == 0 ? h->param.i_width : (h->param.i_width >> 1);
+	int pic_h = ch == 0 ? h->param.i_height : (h->param.i_height >> 1);
+	const int w_size_log2 = 4;//// width for luma_mb :16 ; width for chroma_mb 16 (uv interleved)
+	const int h_size_log2 = (ch == 0 ? 4 : 3);// height for luma_mb :16 ; height for chroma_mb 8
+	const int i_stride = h->fenc->i_stride[!!ch];// 
+	int mb_pix_offset = (h->mb.i_mb_x << w_size_log2) + (h->mb.i_mb_y << h_size_log2)* i_stride;
+	int mb_y_offset = h->mb.i_mb_y << h_size_log2;
+	int mb_x_offset = h->mb.i_mb_x << (ch == 0 ? 4 : 3);
+
+	if (num_ref == 0) 
+		return;
+
+	for (i = start_y; i < (start_y + height); i++) {
+		for (j = start_x; j < (start_x + width); j++) {
+			int i_pix_offset = mb_pix_offset + i * i_stride + (ch == 0 ? j : (j << 1) + ch - 1);
+			pixel curr_denoise_pix = h->fenc->plane_dnr[!!ch][i_pix_offset];
+			pixel curr_pix = h->mb.pic.p_fenc[ch][i*FENC_STRIDE + j]; // orig_src
+			int diff = abs(curr_pix - curr_denoise_pix);
+			// add 1 is to avoid sum_c result in zero 
+			int sum_c = 128/(num_ref+1)* h->param.dnr.Bilateral_table[dn_idx_ref][x264_clip3(diff,0,31)][2][2]+1;
+			int sum   = sum_c * curr_denoise_pix;	
+			for (n = 0; n < num_ref; n++) {
+				pixel curr_ref_pix = ref_ptr[n][(i + 0)*ref_stride[n] + (ch == 0 ? (j + 0) : ((j + 0) << 1))];				
+				diff = abs(curr_pix - curr_ref_pix);
+				int curr_c = alpha[n]*h->param.dnr.Bilateral_table[dn_idx_ref][x264_clip3(diff, 0, 31)][2][2];
+				sum   += curr_c* curr_ref_pix;
+				sum_c += curr_c;
+			}
+			h->fenc->plane_dnr[!!ch][i_pix_offset] = x264_clip3((sum+sum_c/2)/sum_c,0,255);
+		}
+	}
+}
+static inline void block_copy(pixel *dst, intptr_t i_dst_stride, pixel *src, intptr_t i_src_stride, int i_width, int i_height)
+{
+	for (int y = 0; y < i_height; y++)
+	{
+		memcpy(dst, src, i_width * sizeof(pixel));
+		src += i_src_stride;
+		dst += i_dst_stride;
+	}
+}
+
+static inline void x264_3denoise(x264_t *h)
+{
+
+	//h->fenc->plane[0],h->fenc->i_stride[0] // pic_src_y
+	//h->fenc->plane[1],h->fenc->i_stride[1] // pic_src_uv （interleaved�?
+	//h->mb.pic.p_fenc[0,1,2], FENC_STRIDE // mb_src y u v
+	//h->mb.pic.p_fdec[0,1,2], FDEC_STRIDE // mb_rec y u v
+	if (h->param.dnr.x264_dn_y_idx > 0)//luma
+	{
+		int mb_pix_offset = h->mb.i_mb_y * 16 * h->fenc->i_stride[0] + h->mb.i_mb_x * 16;
+		if (IS_X264_TYPE_I(h->fenc->i_type))
+		{
+            x264_log( h, X264_LOG_ERROR, "denoise_2d\n" );
+			denoise_2d(h, 0, 0, 16, 16, 0, x264_clip3(h->param.dnr.x264_dn_y_idx - 1,0,5));// for all pic mb first filter
+		}
+		else //if (!IS_X264_TYPE_I(h->fenc->i_type))
+		{
+			pixel *ref_block[X264_REF_MAX+2]={NULL};
+			int stride[X264_REF_MAX+2]={0};
+			int weight[X264_REF_MAX+2]={0};
+			int num_ref_block = 0;
+			int min_ref_dist = X264_REF_MAX;
+
+			//to make 3dnr more fast
+			//denoise_2d(h, 0, 0, 16, 16, 0, x264_clip3((h->param.dnr.x264_dn_y_idx )/2 , 0, 4));// for all pic mb first filter
+
+			for (int l = 0; l < (IS_X264_TYPE_B(h->fenc->i_type) ? 2 : 1); l++) 
+			{
+				for (int j = 0; j < h->i_ref[l]; j++)
+				{
+					x264_frame_t *ref_frame = h->fref[l][j];
+					int ref_distance = l == 0 ? h->fenc->i_frame - ref_frame->i_frame - 1 : ref_frame->i_frame - h->fenc->i_frame - 1;
+
+					if (ref_distance <= h->param.i_bframe && h->fenc->lowres_mvs[l][ref_distance][0][0] != 0x7fff) 
+					{
+						int i_cost_ssd;
+						int16_t mvx = (h->fenc->lowres_mvs[l][ref_distance][h->mb.i_mb_xy][0]) << 1;
+						int16_t mvy = (h->fenc->lowres_mvs[l][ref_distance][h->mb.i_mb_xy][1]) << 1;
+						int ref_offsetx = mvx / 4 + h->mb.i_mb_x * 16;
+						int ref_offsety = mvy / 4 + h->mb.i_mb_y * 16;
+						int weight0 = h->param.dnr.x264_ref_weight[0] / (j + 1);
+
+						stride[num_ref_block] = ref_frame->i_stride[0];
+						if (ref_offsetx >= (0 - 24) && ref_offsetx < (ref_frame->i_width[0] + 24 - 16) && ref_offsety >= (0 - 24) && ref_offsety < (ref_frame->i_lines[0] + 24 - 16))
+						{
+							ref_block[num_ref_block] = &ref_frame->plane[0][ref_offsety*ref_frame->i_stride[0] + ref_offsetx];
+							block_copy(h->mb.pic.p_fdec[0], FDEC_STRIDE, ref_block[num_ref_block], ref_frame->i_stride[0], 16, 16);
+							i_cost_ssd = h->pixf.ssd[PIXEL_16x16](h->mb.pic.p_fenc[0], FENC_STRIDE, h->mb.pic.p_fdec[0], FDEC_STRIDE);//ssd
+							i_cost_ssd = i_cost_ssd >> 3;								
+							if (h->param.dnr.x264_weight_adp)
+							{
+								if (i_cost_ssd > h->param.dnr.x264_weight_th[3])
+								{
+									weight0 = weight0 * h->param.dnr.x264_weight_rate[3] >> 4;
+								}
+								else if (i_cost_ssd > h->param.dnr.x264_weight_th[2])
+								{
+									weight0 = weight0 * h->param.dnr.x264_weight_rate[2] >> 4;
+								}
+								else if (i_cost_ssd > h->param.dnr.x264_weight_th[1])
+								{
+									weight0 = weight0 * h->param.dnr.x264_weight_rate[1] >> 4;
+								}
+								else if (i_cost_ssd > h->param.dnr.x264_weight_th[0])
+								{
+									weight0 = weight0 * h->param.dnr.x264_weight_rate[0] >> 4;
+								}
+							}
+							if (weight0 > 0) {
+								weight[num_ref_block] = weight0;
+								num_ref_block++;
+							}
+						}
+					}
+				}
+			}
+			if (num_ref_block > 0) {
+				//denoise_2d(h, 0, 0, 16, 16, 0, x264_clip3(h->param.dnr.x264_dn_y_idx-num_ref_block, 0, 4));
+                x264_log( h, X264_LOG_ERROR, "denoise_3d_2\n" );
+				denoise_3d_2(h, 0, 0, 16, 16, num_ref_block, weight, 0, h->param.dnr.x264_dn_y_idx - 1, h->param.dnr.x264_dn_y_idx - 1, ref_block, stride);
+			}
+			else{
+                x264_log( h, X264_LOG_ERROR, "denoise_2d\n" );
+                denoise_2d(h, 0, 0, 16, 16, 0, h->param.dnr.x264_dn_y_idx - 1);
+            }
+		}
+		//cover denoised pixl from fen->plane_dnr[0] to h->mb.pic.p_fenc ;
+		for(int k=0;k<16;k++)
+			memcpy(&h->mb.pic.p_fenc[0][k*FENC_STRIDE],&h->fenc->plane_dnr[0][mb_pix_offset +k* h->fenc->i_stride[0]],16);
+	}
+
+
+	if (h->param.dnr.x264_dn_uv_idx > 0)//chroma
+	{
+		int mb_pix_offset = h->mb.i_mb_y * 8 * h->fenc->i_stride[1] + h->mb.i_mb_x * 16;
+		if (IS_X264_TYPE_I(h->fenc->i_type)) {
+			denoise_2d(h, 0, 0, 8, 8, 1, x264_clip3(h->param.dnr.x264_dn_uv_idx - 1 - 2, 0, 8));
+			denoise_2d(h, 0, 0, 8, 8, 2, x264_clip3(h->param.dnr.x264_dn_uv_idx - 1 - 2, 0, 8));
+		}
+		else /*if (!IS_X264_TYPE_I(h->fenc->i_type))*/
+		{
+			pixel *ref_block[2][X264_REF_MAX+2]={NULL};
+			int stride[2][X264_REF_MAX+2]={0};
+			int weight[2][X264_REF_MAX+2]={0};
+			int num_ref_block[2] = { 0,0 };
+			//denoise_2d(h, 0, 0, 8, 8, 1, x264_clip3(h->param.dnr.x264_dn_uv_idx - 1 , 0, 8));
+			//denoise_2d(h, 0, 0, 8, 8, 2, x264_clip3(h->param.dnr.x264_dn_uv_idx - 1 , 0, 8));
+
+			for (int l = 0; l < (IS_X264_TYPE_B(h->fenc->i_type) ? 2 : 1); l++)
+			{
+				for (int j = 0; j < h->i_ref[l]; j++)
+				{
+					x264_frame_t *ref_frame = h->fref[l][j];
+					int ref_distance = l == 0 ? h->fenc->i_frame - ref_frame->i_frame - 1 : ref_frame->i_frame - h->fenc->i_frame - 1;
+					if (ref_distance <= h->param.i_bframe && h->fenc->lowres_mvs[l][ref_distance][0][0] != 0x7fff) 
+					{
+						int16_t mvx = (h->fenc->lowres_mvs[l][ref_distance][h->mb.i_mb_xy][0]) << 1;
+						int16_t mvy = (h->fenc->lowres_mvs[l][ref_distance][h->mb.i_mb_xy][1]) << 1;
+						int ref_offsetx = (mvx / 8 + h->mb.i_mb_x * 8) * 2;
+						int ref_offsety = mvy / 8 + h->mb.i_mb_y * 8;
+						if (ref_offsetx >= (0 - 24) && ref_offsetx < (ref_frame->i_width[0] + 24 - 16) && ref_offsety >= (0 - 24) && ref_offsety < (ref_frame->i_lines[0] + 24 - 16))
+						{	
+							//int weight0 = h->param.dnr.x264_ref_weight[1] / (ref_distance + 1);
+							int weight0 = x264_clip3((j + 1)*j, 1, 31);
+							weight0 = h->param.dnr.Bilateral_table[h->param.dnr.x264_dn_uv_idx - 1][weight0][2][2];
+							weight0 = h->param.dnr.x264_ref_weight[0] * weight0 >> 6; // weight0 has a scale factor 64
+
+							h->mc.mc_chroma(&h->mb.pic.p_fdec[1][0],
+								&h->mb.pic.p_fdec[2][0], FDEC_STRIDE,
+								&ref_frame->plane[1][mb_pix_offset], h->mb.pic.i_stride[1],
+								mvx, mvy, 8, 8);
+
+							for (int ch = 1; ch <= 2; ch++) {
+								int temp_w = weight0;
+								int num = num_ref_block[ch - 1];
+								int i_cost_ssd = h->pixf.ssd[PIXEL_8x8](h->mb.pic.p_fenc[ch], FENC_STRIDE, h->mb.pic.p_fdec[ch], FDEC_STRIDE);//ssd								
+								i_cost_ssd = i_cost_ssd >> 2;
+								if (h->param.dnr.x264_weight_adp)
+								{
+									if (i_cost_ssd > h->param.dnr.x264_weight_th_c[3])
+									{
+										temp_w = temp_w * h->param.dnr.x264_weight_rate_c[3] >> 4;
+									}
+									else if (i_cost_ssd > h->param.dnr.x264_weight_th_c[2])
+									{
+										temp_w = temp_w * h->param.dnr.x264_weight_rate_c[2] >> 4;
+									}
+									else if (i_cost_ssd > h->param.dnr.x264_weight_th_c[1])
+									{
+										temp_w = temp_w * h->param.dnr.x264_weight_rate_c[1] >> 4;
+									}
+									else if (i_cost_ssd > h->param.dnr.x264_weight_th_c[0])
+									{
+										temp_w = temp_w * h->param.dnr.x264_weight_rate_c[0] >> 4;
+									}
+								}
+								if (temp_w > 0) {
+									ref_block[ch-1][num] = &ref_frame->plane[1][ref_offsety*ref_frame->i_stride[1] + ref_offsetx+ch-1];
+									weight[ch-1][num] = temp_w;
+									stride[ch-1][num] = ref_frame->i_stride[1];
+									num_ref_block[ch-1]++;
+								}
+							}
+						}
+					}
+				}
+			}
+			if (num_ref_block[0] > 0) {//u
+				//denoise_2d(h, 0, 0, 8, 8, 1, x264_clip3(h->param.dnr.x264_dn_uv_idx - 1 - 2, 0, 8));
+				denoise_3d_2(h, 0, 0, 8, 8, num_ref_block[0], weight[0], 1, h->param.dnr.x264_dn_uv_idx - 1, h->param.dnr.x264_dn_uv_idx - 1, ref_block[0], stride[0]);
+				
+			}
+			else
+				denoise_2d(h, 0, 0, 8, 8, 1, x264_clip3(h->param.dnr.x264_dn_uv_idx - 1-2, 0, 8));
+
+			if (num_ref_block[1] > 0) {//v
+				//denoise_2d(h, 0, 0, 8, 8, 2, x264_clip3(h->param.dnr.x264_dn_uv_idx - 1 - 2, 0, 8));
+				denoise_3d_2(h, 0, 0, 8, 8, num_ref_block[1], weight[1], 2, h->param.dnr.x264_dn_uv_idx - 1, h->param.dnr.x264_dn_uv_idx - 1, ref_block[1], stride[1]);
+			}
+			else
+				denoise_2d(h, 0, 0, 8, 8, 2, x264_clip3(h->param.dnr.x264_dn_uv_idx - 1-2, 0, 8));
+
+		}
+		for (int k = 0; k < 8; k++) 
+		{
+			for (int n = 0; n < 8; n++) 
+			{
+				h->mb.pic.p_fenc[1][k*FENC_STRIDE + n] = h->fenc->plane_dnr[1][mb_pix_offset + k * h->fenc->i_stride[1] + 2 * n];
+				h->mb.pic.p_fenc[2][k*FENC_STRIDE + n] = h->fenc->plane_dnr[1][mb_pix_offset + k * h->fenc->i_stride[1] + 2 * n + 1];
+			}
+		}
+	}
+}
+
+#endif 
+
 /*****************************************************************************
  * x264_macroblock_analyse:
  *****************************************************************************/
@@ -2929,6 +3531,22 @@ void x264_macroblock_analyse( x264_t *h )
     if( h->param.analyse.b_mb_info )
         h->fdec->effective_qp[h->mb.i_mb_xy] = h->mb.i_qp; /* Store the real analysis QP. */
     mb_analyse_init( h, &analysis, h->mb.i_qp );
+#if X264_DNR
+        if ( !h->mb.b_lossless && BIT_DEPTH == 8 && CHROMA_FORMAT==CHROMA_420)
+        {
+            x264_log( h, X264_LOG_ERROR, "denoise\n" );
+            x264_3denoise(h);
+        }
+
+#endif
+#if X264_CDEF
+        if (!h->mb.b_lossless && BIT_DEPTH == 8 && CHROMA_FORMAT == CHROMA_420  &&
+             h->param.cdef.cdef_level > 0 )
+        {
+            int cdef_strength = h->param.cdef.cdef_level;
+            x264_cdef_mb(h,cdef_strength /*5/*level*/);// 0, 1, 2, 3, 5, 7, 10, 13 //b 5 is optimal
+        }
+#endif
 
     /*--------------------------- Do the analysis ---------------------------*/
     if( h->sh.i_type == SLICE_TYPE_I )

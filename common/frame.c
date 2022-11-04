@@ -154,6 +154,11 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
         PREALLOC( frame->buffer[1], chroma_plane_size * SIZEOF_PIXEL );
         if( PARAM_INTERLACED )
             PREALLOC( frame->buffer_fld[1], chroma_plane_size * SIZEOF_PIXEL );
+#if X264_PRE_FILTER //chroma buffer allocate
+		if (!b_fdec) {
+			PREALLOC(frame->buffer_dnr[1], (chroma_plane_size) * SIZEOF_PIXEL);
+		}
+#endif		
     }
 
     /* all 4 luma planes allocated together, since the cacheline split code
@@ -169,6 +174,12 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
         PREALLOC( frame->buffer[p], luma_plane_size * SIZEOF_PIXEL );
         if( PARAM_INTERLACED )
             PREALLOC( frame->buffer_fld[p], luma_plane_size * SIZEOF_PIXEL );
+#if X264_PRE_FILTER // luma buffer allocate
+		if (!b_fdec) {
+			PREALLOC(frame->buffer_dnr[p], (luma_plane_size ) * SIZEOF_PIXEL);
+			//PREALLOC(frame->buffer_cdef[p], (luma_plane_size ) * sizeof(pixel));
+		}
+#endif
     }
 
     frame->b_duplicate = 0;
@@ -240,6 +251,11 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
         frame->plane[1] = frame->buffer[1] + frame->i_stride[1] * chroma_padv + PADH_ALIGN;
         if( PARAM_INTERLACED )
             frame->plane_fld[1] = frame->buffer_fld[1] + frame->i_stride[1] * chroma_padv + PADH_ALIGN;
+#if X264_PRE_FILTER //chroma point to buffer
+		if (!b_fdec) {
+			frame->plane_dnr[1] = frame->buffer_dnr[1] + frame->i_stride[1] * chroma_padv + PADH_ALIGN ;
+		}
+#endif		
     }
 
     for( int p = 0; p < luma_plane_count; p++ )
@@ -262,6 +278,12 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
             if( PARAM_INTERLACED )
                 frame->filtered_fld[p][0] = frame->plane_fld[p] = frame->buffer_fld[p] + frame->i_stride[p] * i_padv + PADH_ALIGN;
         }
+#if X264_PRE_FILTER //luma point to buffer
+			if (!b_fdec) {
+				frame->plane_dnr[p] = frame->buffer_dnr[p] + frame->i_stride[p] * i_padv + PADH_ALIGN;
+				//frame->plane_cdef[p] = frame->buffer_cdef[p] + frame->i_stride[p] * i_padv + PADH ;
+			}
+#endif
     }
 
     if( b_fdec )

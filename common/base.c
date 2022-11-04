@@ -457,6 +457,64 @@ REALIGN_STACK void x264_param_default( x264_param_t *param )
     param->analyse.i_luma_deadzone[1] = 11;
     param->analyse.b_psnr = 0;
     param->analyse.b_ssim = 0;
+#if X264_DNR
+	{  //default value
+		int valDMax = 32;
+		int tableRange = 64;
+		int sigmaD2 = 2*2;//sigmaD*sigmaD
+		int talbe_list[11] = { 1,2,3,5,8,10,13,16,18,20,24 };
+		int t_num;
+		int valD;
+		int x, y;
+		int r2;
+
+		for (t_num = 0; t_num < 10; t_num++) {
+			for (valD = 0; valD < valDMax; valD++) {
+				for (y = 0; y < 5; y++) {
+					for (x = 0; x < 5; x++) {
+						r2 = (x - 2)*(x - 2) + (y - 2)*(y - 2);
+						param->dnr.Bilateral_table[t_num][valD][y][x] = (unsigned int)(exp((double)(-((double)valD) / ((double)talbe_list[t_num])))*exp((double)(-((double)r2) / (double)(2 * sigmaD2)))*(double)(tableRange));
+						//param->dnr.Bilateral_table[t_num][valD][y][x] = (unsigned int)(exp((double)(-((double)valD*valD) / ((double)talbe_list[t_num])))*exp((double)(-((double)r2) / (double)(2 * sigmaD2)))*(double)(tableRange));
+					}
+				}
+			}
+		}
+		param->dnr.x264_dn_y_idx = 0;         //# 0~10 select denoise level for y  0:off
+		param->dnr.x264_dn_uv_idx = 0;          //= 0	   # 0~5 select denoise level for src_uv 0: off
+		param->dnr.x264_ref_weight[0] = 200;		 //  = 0   # 0~255 ref weight 8bits for luma 
+		param->dnr.x264_ref_weight[1] = 255;	     //  = 0   # 0~255 ref weight 8bits for chroma
+		param->dnr.x264_3d_mv_th = 255; 			 //  = 0   # 0~255 mv thresh 2d th
+		param->dnr.x264_weight_adp = 1;
+
+		param->dnr.x264_weight_th[0] = 40;
+		param->dnr.x264_weight_th[1] = 160;
+		param->dnr.x264_weight_th[2] = 320;
+		param->dnr.x264_weight_th[3] = 500;
+		param->dnr.x264_weight_rate[0] = 12;
+		param->dnr.x264_weight_rate[1] = 8;
+		param->dnr.x264_weight_rate[2] = 4;
+		param->dnr.x264_weight_rate[3] = 0;
+
+		param->dnr.x264_weight_th_c[0] = 10;
+		param->dnr.x264_weight_th_c[1] = 40;
+		param->dnr.x264_weight_th_c[2] = 80;
+		param->dnr.x264_weight_th_c[3] = 125;
+		param->dnr.x264_weight_rate_c[0] = 12;
+		param->dnr.x264_weight_rate_c[1] = 8;
+		param->dnr.x264_weight_rate_c[2] = 4;
+		param->dnr.x264_weight_rate_c[3] = 0;
+	}
+#endif 
+#if X264_SHARP
+	//default value
+	param->x264_sharp_ratio = 0;          //  (-2.0,2.0)
+#endif
+
+#if X264_CDEF
+	{//default value
+		param->cdef.cdef_level = 0;
+	}
+#endif 
 
     param->i_cqm_preset = X264_CQM_FLAT;
     memset( param->cqm_4iy, 16, sizeof( param->cqm_4iy ) );
@@ -1404,6 +1462,21 @@ REALIGN_STACK int x264_param_parse( x264_param_t *p, const char *name, const cha
         CHECKED_ERROR_PARAM_STRDUP( p->psz_clbin_file, p, value );
     OPT("opencl-device")
         p->i_opencl_device = atoi( value );
+#if X264_DNR
+	OPT("dnr-y-level")
+		p->dnr.x264_dn_y_idx = x264_clip3(atoi(value), 0, 10);
+	OPT("dnr-uv-level")
+		p->dnr.x264_dn_uv_idx = x264_clip3(atoi(value), 0, 10);
+#endif
+
+#if X264_SHARP
+	OPT("sharp-ratio")
+        p->x264_sharp_ratio =  x264_clip3f(atof(value),-2.0,2.0);
+#endif
+#if X264_CDEF
+	OPT("cdef-level")
+		p->cdef.cdef_level= x264_clip3(atoi(value), 0, 10);
+#endif	
     else
     {
         b_error = 1;

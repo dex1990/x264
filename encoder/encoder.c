@@ -3375,6 +3375,45 @@ int     x264_encoder_encode( x264_t *h,
         if( h->param.i_width != 16 * h->mb.i_mb_width ||
             h->param.i_height != 16 * h->mb.i_mb_height )
             x264_frame_expand_border_mod16( h, fenc );
+#if X264_PRE_FILTER  // copy src to dnr_buffer and cdef_buffer
+        if (h->param.cdef.cdef_level > 0 || h->param.dnr.x264_dn_y_idx > 0 || h->param.dnr.x264_dn_uv_idx > 0)
+        {
+				for (int p = 0; p < 2; p++) //p=0 for luma	p=1 for chroma interleved
+				{
+					int plane_size = fenc->i_stride[p] * fenc->i_lines[p];
+					pixel *ptr_dnr1 = p==0? &fenc->plane_dnr[p][-2] : &fenc->plane_dnr[p][-4];
+					pixel *ptr_dnr2 = &fenc->plane_dnr[p][(fenc->i_width[p]-1)*(p+1)];
+		
+					memcpy(fenc->plane_dnr[p], fenc->plane[p], plane_size * sizeof(pixel));
+					//memcpy(fenc->plane_cdef[p], fenc->plane[p], plane_size * sizeof(pixel));
+					
+					for (int i = 0; i < fenc->i_lines[p]; i++) {
+						if (p == 0) {
+							*ptr_dnr1 = *(ptr_dnr1 + 1) = *(ptr_dnr1 + 2);//left 2 col
+							*(ptr_dnr2 + 1) = *(ptr_dnr2 + 2) = *(ptr_dnr2);//right 2 col
+						}
+						else
+						{
+							*ptr_dnr1 = *(ptr_dnr1 + 2) = *(ptr_dnr1 + 4);//left 2 col u
+							*(ptr_dnr1+1) = *(ptr_dnr1 + 3) = *(ptr_dnr1 + 5);//left 2 col v
+		
+							*(ptr_dnr2 + 2) = *(ptr_dnr2 + 4) = *(ptr_dnr2);//right 2 col u
+							*(ptr_dnr2 + 3) = *(ptr_dnr2 + 5) = *(ptr_dnr2+1); //right 2 col v
+						}
+		
+						ptr_dnr1 += fenc->i_stride[p];
+						ptr_dnr2 += fenc->i_stride[p];
+					}
+		
+					//top 2 rows
+					memcpy(&fenc->plane_dnr[p][  -fenc->i_stride[p]-2*(p + 1)], &fenc->plane_dnr[p][-2 * (p + 1)], fenc->i_stride[p] * sizeof(pixel));
+					memcpy(&fenc->plane_dnr[p][-2*fenc->i_stride[p]-2*(p + 1)], &fenc->plane_dnr[p][-2 * (p + 1)], fenc->i_stride[p] * sizeof(pixel));
+					// bottom 2 rows
+					memcpy(&fenc->plane_dnr[p][plane_size- 2 * (p + 1)], &fenc->plane[p][plane_size - 2 * (p + 1) - fenc->i_stride[p]], fenc->i_stride[p] * sizeof(pixel));
+					memcpy(&fenc->plane_dnr[p][plane_size+ fenc->i_stride[p]-2 * (p + 1)], &fenc->plane[p][plane_size - 2 * (p + 1) - fenc->i_stride[p]], fenc->i_stride[p] * sizeof(pixel));
+				}
+        }
+#endif
 
         fenc->i_frame = h->frames.i_input++;
 

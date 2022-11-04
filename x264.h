@@ -224,6 +224,11 @@ typedef struct x264_nal_t
 #define X264_AVCINTRA_FLAVOR_PANASONIC 0
 #define X264_AVCINTRA_FLAVOR_SONY      1
 
+#define  X264_PRE_FILTER                1//dexterxiong
+#define  X264_DNR                    	1
+#define  X264_CDEF                      1
+#define  X264_SHARP                     1
+
 static const char * const x264_direct_pred_names[] = { "none", "spatial", "temporal", "auto", 0 };
 static const char * const x264_motion_est_names[] = { "dia", "hex", "umh", "esa", "tesa", 0 };
 static const char * const x264_b_pyramid_names[] = { "none", "strict", "normal", 0 };
@@ -427,6 +432,30 @@ typedef struct x264_param_t
         int          b_psnr;    /* compute and print PSNR stats */
         int          b_ssim;    /* compute and print SSIM stats */
     } analyse;
+
+#if X264_DNR
+	struct
+	{
+		unsigned int Bilateral_table[10][32][5][5];
+		int  x264_dn_y_idx;
+		int  x264_dn_uv_idx;
+		int  x264_ref_weight[2];
+		int  x264_3d_mv_th;
+		int  x264_weight_adp;
+		int  x264_weight_th[4];
+		int  x264_weight_rate[4];
+		int  x264_weight_th_c[4];
+		int  x264_weight_rate_c[4];
+	} dnr;
+#endif
+#if X264_SHARP
+	float x264_sharp_ratio;
+#endif
+#if	X264_CDEF
+	struct {
+		int cdef_level;
+	}cdef;
+#endif	
 
     /* Rate control parameters */
     struct

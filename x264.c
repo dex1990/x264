@@ -952,6 +952,17 @@ static void help( x264_param_t *defaults, int longhelp )
     H2( "      --dump-yuv <string>     Save reconstructed frames\n" );
     H2( "      --sps-id <integer>      Set SPS and PPS id numbers [%d]\n", defaults->i_sps_id );
     H2( "      --aud                   Use access unit delimiters\n" );
+#if X264_DNR
+		H2("	   --dnr-y-level		   3dnr level for y_component(0~10)[%d]\n", defaults->dnr.x264_dn_y_idx);
+		H2("	   --dnr-uv-level		   3dnr level for uv_component(0~10)[%d]\n", defaults->dnr.x264_dn_uv_idx);
+#endif
+#if X264_SHARP
+		H2( "	   --sharp-ratio <float>   Sharp the denoised src by a factor(-2.0~2.0)[%.2f]\n", defaults->x264_sharp_ratio);
+#endif 
+#if X264_CDEF
+		H2("	   --cdef-level 		  cdef level (0~10)[%d]\n", defaults->cdef.cdef_level);
+#endif
+
     H2( "      --force-cfr             Force constant framerate timestamp generation\n" );
     H2( "      --tcfile-in <string>    Force timestamp generation with timecode file\n" );
     H2( "      --tcfile-out <string>   Output timecode v2 file from input timestamps\n" );
@@ -1154,6 +1165,16 @@ static struct option long_options[] =
     { "transfer",             required_argument, NULL, 0 },
     { "colormatrix",          required_argument, NULL, 0 },
     { "chromaloc",            required_argument, NULL, 0 },
+#if X264_DNR	
+	{ "dnr-y-level",  required_argument, NULL, 0 },
+	{ "dnr-uv-level", required_argument, NULL, 0 },
+#endif
+#if X264_SHARP
+	{ "sharp-ratio",  required_argument, NULL, 0 },
+#endif
+#if X264_CDEF	
+	{ "cdef-level",  required_argument, NULL, 0 },
+#endif  
     { "force-cfr",            no_argument,       NULL, 0 },
     { "tcfile-in",            required_argument, NULL, OPT_TCFILE_IN },
     { "tcfile-out",           required_argument, NULL, OPT_TCFILE_OUT },
