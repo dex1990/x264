@@ -3330,7 +3330,7 @@ static inline void x264_3denoise(x264_t *h)
 		int mb_pix_offset = h->mb.i_mb_y * 16 * h->fenc->i_stride[0] + h->mb.i_mb_x * 16;
 		if (IS_X264_TYPE_I(h->fenc->i_type))
 		{
-            x264_log( h, X264_LOG_ERROR, "denoise_2d\n" );
+            x264_log( h, X264_LOG_ERROR, "denoise_2d i\n" );
 			denoise_2d(h, 0, 0, 16, 16, 0, x264_clip3(h->param.dnr.x264_dn_y_idx - 1,0,5));// for all pic mb first filter
 		}
 		else //if (!IS_X264_TYPE_I(h->fenc->i_type))
@@ -3360,32 +3360,39 @@ static inline void x264_3denoise(x264_t *h)
 						int ref_offsety = mvy / 4 + h->mb.i_mb_y * 16;
 						int weight0 = h->param.dnr.x264_ref_weight[0] / (j + 1);
 
+                        //x264_log( h, X264_LOG_ERROR, "ref_offsetx %d i_width %d ref_offsety %d i_lines %d\n",  ref_offsetx, ref_frame->i_width[0] + 24 - 16, ref_offsety, ref_frame->i_lines[0] + 24 - 16);
 						stride[num_ref_block] = ref_frame->i_stride[0];
 						if (ref_offsetx >= (0 - 24) && ref_offsetx < (ref_frame->i_width[0] + 24 - 16) && ref_offsety >= (0 - 24) && ref_offsety < (ref_frame->i_lines[0] + 24 - 16))
 						{
 							ref_block[num_ref_block] = &ref_frame->plane[0][ref_offsety*ref_frame->i_stride[0] + ref_offsetx];
 							block_copy(h->mb.pic.p_fdec[0], FDEC_STRIDE, ref_block[num_ref_block], ref_frame->i_stride[0], 16, 16);
 							i_cost_ssd = h->pixf.ssd[PIXEL_16x16](h->mb.pic.p_fenc[0], FENC_STRIDE, h->mb.pic.p_fdec[0], FDEC_STRIDE);//ssd
-							i_cost_ssd = i_cost_ssd >> 3;								
+							i_cost_ssd = i_cost_ssd >> 3;
 							if (h->param.dnr.x264_weight_adp)
 							{
+                                x264_log( h, X264_LOG_ERROR, "i_cost_ssd %d\n", i_cost_ssd );
 								if (i_cost_ssd > h->param.dnr.x264_weight_th[3])
 								{
+                                    x264_log( h, X264_LOG_ERROR, "x264_weight_rate[3] %d\n", h->param.dnr.x264_weight_rate[3] );
 									weight0 = weight0 * h->param.dnr.x264_weight_rate[3] >> 4;
 								}
 								else if (i_cost_ssd > h->param.dnr.x264_weight_th[2])
 								{
+                                    x264_log( h, X264_LOG_ERROR, "x264_weight_rate[2] %d\n", h->param.dnr.x264_weight_rate[2] );
 									weight0 = weight0 * h->param.dnr.x264_weight_rate[2] >> 4;
 								}
 								else if (i_cost_ssd > h->param.dnr.x264_weight_th[1])
 								{
+                                    x264_log( h, X264_LOG_ERROR, "x264_weight_rate[1] %d\n", h->param.dnr.x264_weight_rate[1] );
 									weight0 = weight0 * h->param.dnr.x264_weight_rate[1] >> 4;
 								}
 								else if (i_cost_ssd > h->param.dnr.x264_weight_th[0])
 								{
+                                    x264_log( h, X264_LOG_ERROR, "x264_weight_rate[0] %d\n", h->param.dnr.x264_weight_rate[0] );
 									weight0 = weight0 * h->param.dnr.x264_weight_rate[0] >> 4;
 								}
 							}
+                            x264_log( h, X264_LOG_ERROR, "weight0 %d\n", weight0 );
 							if (weight0 > 0) {
 								weight[num_ref_block] = weight0;
 								num_ref_block++;
@@ -3396,11 +3403,11 @@ static inline void x264_3denoise(x264_t *h)
 			}
 			if (num_ref_block > 0) {
 				//denoise_2d(h, 0, 0, 16, 16, 0, x264_clip3(h->param.dnr.x264_dn_y_idx-num_ref_block, 0, 4));
-                x264_log( h, X264_LOG_ERROR, "denoise_3d_2\n" );
+                x264_log( h, X264_LOG_ERROR, "denoise_3d_2 b\n" );
 				denoise_3d_2(h, 0, 0, 16, 16, num_ref_block, weight, 0, h->param.dnr.x264_dn_y_idx - 1, h->param.dnr.x264_dn_y_idx - 1, ref_block, stride);
 			}
 			else{
-                x264_log( h, X264_LOG_ERROR, "denoise_2d\n" );
+                x264_log( h, X264_LOG_ERROR, "denoise_2d b\n" );
                 denoise_2d(h, 0, 0, 16, 16, 0, h->param.dnr.x264_dn_y_idx - 1);
             }
 		}
@@ -3532,6 +3539,7 @@ void x264_macroblock_analyse( x264_t *h )
         h->fdec->effective_qp[h->mb.i_mb_xy] = h->mb.i_qp; /* Store the real analysis QP. */
     mb_analyse_init( h, &analysis, h->mb.i_qp );
 #if X264_DNR
+        x264_log( h, X264_LOG_ERROR, "b_lossless %d BIT_DEPTH %d CHROMA_FORMAT %d\n",  h->mb.b_lossless, BIT_DEPTH, CHROMA_FORMAT);
         if ( !h->mb.b_lossless && BIT_DEPTH == 8 && CHROMA_FORMAT==CHROMA_420)
         {
             x264_log( h, X264_LOG_ERROR, "denoise\n" );
