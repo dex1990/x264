@@ -3376,6 +3376,7 @@ int     x264_encoder_encode( x264_t *h,
             h->param.i_height != 16 * h->mb.i_mb_height )
             x264_frame_expand_border_mod16( h, fenc );
 #if X264_PRE_FILTER  // copy src to dnr_buffer and cdef_buffer
+        int64_t i_time_begin = x264_mdate();
         if (h->param.cdef.cdef_level > 0 || h->param.dnr.x264_dn_y_idx > 0 || h->param.dnr.x264_dn_uv_idx > 0)
         {
 				for (int p = 0; p < 2; p++) //p=0 for luma	p=1 for chroma interleved
@@ -3413,6 +3414,8 @@ int     x264_encoder_encode( x264_t *h,
 					memcpy(&fenc->plane_dnr[p][plane_size+ fenc->i_stride[p]-2 * (p + 1)], &fenc->plane[p][plane_size - 2 * (p + 1) - fenc->i_stride[p]], fenc->i_stride[p] * sizeof(pixel));
 				}
         }
+        int64_t d_elapsed = x264_mdate() - i_time_begin;
+        x264_log( h, X264_LOG_ERROR, "========prefilter frame elapsed : %d========\n",  d_elapsed);
 #endif
 
         fenc->i_frame = h->frames.i_input++;
