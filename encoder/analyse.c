@@ -3330,10 +3330,10 @@ static inline void x264_3denoise(x264_t *h)
 		int mb_pix_offset = h->mb.i_mb_y * 16 * h->fenc->i_stride[0] + h->mb.i_mb_x * 16;
 		if (IS_X264_TYPE_I(h->fenc->i_type))
 		{
-            int64_t i_time_begin = x264_mdate();
+            //int64_t i_time_begin = x264_mdate();
 			denoise_2d(h, 0, 0, 16, 16, 0, x264_clip3(h->param.dnr.x264_dn_y_idx - 1,0,5));// for all pic mb first filter
-            int64_t d_elapsed = x264_mdate() - i_time_begin;
-            x264_log( h, X264_LOG_ERROR, "========denoise i frame elapsed : %d========\n",  d_elapsed);
+            //int64_t d_elapsed = x264_mdate() - i_time_begin;
+            //x264_log( h, X264_LOG_ERROR, "========denoise i frame elapsed : %d========\n",  d_elapsed);
 		}
 		else //if (!IS_X264_TYPE_I(h->fenc->i_type))
 		{
@@ -3404,16 +3404,16 @@ static inline void x264_3denoise(x264_t *h)
 				}
 			}
 			if (num_ref_block > 0) {
-                int64_t i_time_begin = x264_mdate();
+                //int64_t i_time_begin = x264_mdate();
 				denoise_3d_2(h, 0, 0, 16, 16, num_ref_block, weight, 0, h->param.dnr.x264_dn_y_idx - 1, h->param.dnr.x264_dn_y_idx - 1, ref_block, stride);
-                int64_t d_elapsed = x264_mdate() - i_time_begin;
-                x264_log( h, X264_LOG_ERROR, "========denoise 3d b&p frame elapsed : %d========\n",  d_elapsed);
+                //int64_t d_elapsed = x264_mdate() - i_time_begin;
+                //x264_log( h, X264_LOG_ERROR, "========denoise 3d b&p frame elapsed : %d========\n",  d_elapsed);
 			}
 			else{
-                int64_t i_time_begin = x264_mdate();
+                //int64_t i_time_begin = x264_mdate();
                 denoise_2d(h, 0, 0, 16, 16, 0, h->param.dnr.x264_dn_y_idx - 1);
-                int64_t d_elapsed = x264_mdate() - i_time_begin;
-                x264_log( h, X264_LOG_ERROR, "========denoise 2d b&p frame elapsed : %d========\n",  d_elapsed);
+                //int64_t d_elapsed = x264_mdate() - i_time_begin;
+                //x264_log( h, X264_LOG_ERROR, "========denoise 2d b&p frame elapsed : %d========\n",  d_elapsed);
             }
 		}
 		//cover denoised pixl from fen->plane_dnr[0] to h->mb.pic.p_fenc ;
@@ -3546,10 +3546,10 @@ void x264_macroblock_analyse( x264_t *h )
 #if X264_DNR
         if ( !h->mb.b_lossless && BIT_DEPTH == 8 && CHROMA_FORMAT==CHROMA_420)
         {
-            int64_t i_time_begin = x264_mdate();
+            //int64_t i_time_begin = x264_mdate();
             x264_3denoise(h);
-            int64_t d_elapsed = x264_mdate() - i_time_begin;
-            x264_log( h, X264_LOG_ERROR, "====denoise elapsed : %d====\n",  d_elapsed);
+            //int64_t d_elapsed = x264_mdate() - i_time_begin;
+            //x264_log( h, X264_LOG_ERROR, "====denoise elapsed : %d====\n",  d_elapsed);
 
         }
 
@@ -3559,10 +3559,10 @@ void x264_macroblock_analyse( x264_t *h )
              h->param.cdef.cdef_level > 0 )
         {
             int cdef_strength = h->param.cdef.cdef_level;
-            int64_t i_time_begin = x264_mdate();
+            //int64_t i_time_begin = x264_mdate();
             x264_cdef_mb(h,cdef_strength /*5/*level*/);// 0, 1, 2, 3, 5, 7, 10, 13 //b 5 is optimal
-            int64_t d_elapsed = x264_mdate() - i_time_begin;
-            x264_log( h, X264_LOG_ERROR, "====cdef elapsed : %d====\n",  d_elapsed);
+            //int64_t d_elapsed = x264_mdate() - i_time_begin;
+            //x264_log( h, X264_LOG_ERROR, "====cdef elapsed : %d====\n",  d_elapsed);
         }
 #endif
 
